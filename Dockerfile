@@ -1,6 +1,6 @@
 FROM golang:1.14-alpine
 WORKDIR /build
-COPY ./tools/iperf-runner /build
+COPY . /build
 RUN go build -o iperf-runner
 
 FROM alpine:3

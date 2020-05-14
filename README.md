@@ -95,16 +95,16 @@ The service is pushing the following metrics to the STATSD endpoint:
         <th>Description</th>
     </tr>
     <tr>
-        <th><code>start</code></th>
+        <th><code>running</code></th>
         <td>Counter</td>
         <td>-</td>
-        <td>Counts how many times the process has started.</td>
+        <td>Counts how many instances are running. This counter is incremented when IPerf is started and decremented when stopped.</td>
     </tr>
     <tr>
         <th><code>status</code></th>
         <td>Gauge</td>
         <td>-</td>
-        <td>Indicates the last exit code.</td>
+        <td>Indicates the status of the process. It's <code>-1</code> when running or <code>&gt;=0</code> if exited, having the exit code set in this proprty.</td>
     </tr>
     <tr>
         <th><code>bytes</code></th>

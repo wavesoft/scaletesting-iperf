@@ -17,6 +17,7 @@ import (
 const (
 	TYPE_GAUGE     = 1
 	TYPE_INCREMENT = 2
+	TYPE_DECREMENT = 3
 )
 
 type PerfMetric struct {
@@ -145,12 +146,19 @@ func statsdForwarder(host string, port int, prefix string, ch chan *PerfMetric) 
 	for {
 		select {
 		case metric := <-ch:
-			if metric.Type == TYPE_GAUGE {
+
+			switch metric.Type {
+			case TYPE_GAUGE:
 				stats.Gauge(metric.Name, metric.Value)
 				log.Debugf("metric %s%s = %d", prefix, metric.Name, metric.Value)
-			} else if metric.Type == TYPE_INCREMENT {
+
+			case TYPE_INCREMENT:
 				stats.Incr(metric.Name, metric.Value)
 				log.Debugf("metric %s%s += %d", prefix, metric.Name, metric.Value)
+
+			case TYPE_DECREMENT:
+				stats.Decr(metric.Name, metric.Value)
+				log.Debugf("metric %s%s -= %d", prefix, metric.Name, metric.Value)
 			}
 		}
 	}
@@ -283,11 +291,21 @@ func main() {
 	// Start the runner
 	for {
 		metricsChan <- &PerfMetric{
-			Name:  "start",
+			Name:  "status",
+			Value: int64(-1),
+			Type:  TYPE_GAUGE,
+		}
+		metricsChan <- &PerfMetric{
+			Name:  "running",
 			Value: int64(1),
 			Type:  TYPE_INCREMENT,
 		}
 		startIPerf(args, metricsChan)
+		metricsChan <- &PerfMetric{
+			Name:  "running",
+			Value: int64(1),
+			Type:  TYPE_DECREMENT,
+		}
 
 		log.Infof("Going to re-start in %d seconds...", restartSeconds)
 		time.Sleep(time.Second * time.Duration(restartSeconds))
