@@ -78,8 +78,13 @@ The following environment variables can (or must) be provided:
     </tr>
     <tr>
         <th><code>RESTART_SCONDS</code></th>
-        <td>10</td>
+        <td>5</td>
         <td>How many seconds to wait before re-starting the client (or server) after it exists.</td>
+    </tr>
+    <tr>
+        <th><code>RESTART_RANDOM_SCONDS</code></th>
+        <td>5</td>
+        <td>Additional randomized number of seconds to wait after the <code>RESTART_SECONDS</code> timeout.</td>
     </tr>
 </table>
 

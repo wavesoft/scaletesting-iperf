@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/quipo/statsd"
@@ -94,11 +97,42 @@ func byteExprToInt(num string, scale string, scaleBase float64) int64 {
 
 func iperfParser(stdout chan string, stderr chan string, exit chan int, ch chan *PerfMetric) {
 	rxBitrateLine := regexp.MustCompile(`\s([0-9\.]+)\s+([KMGT])Bytes\s+([0-9\.]+) ([KMGT])Bytes\/sec`)
+	running := false
+	status := -1
+
+	go func() {
+		for {
+			// Push the 'status' metric every 30 seconds both for heart beat and
+			// for maintaining a continuous stream of status in grafana
+			ch <- &PerfMetric{
+				Name:  "status",
+				Value: int64(status),
+				Type:  TYPE_GAUGE,
+			}
+			time.Sleep(time.Second * 30)
+		}
+	}()
 
 	for {
 		select {
 		case line := <-stdout:
 			log.Info(line)
+
+			// The first time we see the app running, mark it's status to -1
+			if !running {
+				running = true
+				status = -1
+				ch <- &PerfMetric{
+					Name:  "status",
+					Value: int64(-1),
+					Type:  TYPE_GAUGE,
+				}
+				ch <- &PerfMetric{
+					Name:  "failing",
+					Value: int64(0),
+					Type:  TYPE_GAUGE,
+				}
+			}
 
 			// Extract bit rate information and push them as metrics
 			found := rxBitrateLine.FindStringSubmatch(line)
@@ -120,11 +154,28 @@ func iperfParser(stdout chan string, stderr chan string, exit chan int, ch chan 
 
 		case line := <-stderr:
 			log.Warn(line)
+
 		case code := <-exit:
+			running = false
+			status = code
 			ch <- &PerfMetric{
 				Name:  "status",
 				Value: int64(code),
 				Type:  TYPE_GAUGE,
+			}
+
+			if code == 0 {
+				ch <- &PerfMetric{
+					Name:  "failing",
+					Value: int64(0),
+					Type:  TYPE_GAUGE,
+				}
+			} else {
+				ch <- &PerfMetric{
+					Name:  "failing",
+					Value: int64(1),
+					Type:  TYPE_GAUGE,
+				}
 			}
 			return
 		}
@@ -149,16 +200,16 @@ func statsdForwarder(host string, port int, prefix string, ch chan *PerfMetric) 
 
 			switch metric.Type {
 			case TYPE_GAUGE:
-				stats.Gauge(metric.Name, metric.Value)
-				log.Debugf("metric %s%s = %d", prefix, metric.Name, metric.Value)
+				statsdclient.Gauge(metric.Name, metric.Value)
+				log.Infof("Pushing metric %s%s = %d", prefix, metric.Name, metric.Value)
 
 			case TYPE_INCREMENT:
 				stats.Incr(metric.Name, metric.Value)
-				log.Debugf("metric %s%s += %d", prefix, metric.Name, metric.Value)
+				log.Infof("Pushing metric %s%s += %d", prefix, metric.Name, metric.Value)
 
 			case TYPE_DECREMENT:
 				stats.Decr(metric.Name, metric.Value)
-				log.Debugf("metric %s%s -= %d", prefix, metric.Name, metric.Value)
+				log.Infof("Pushing metric %s%s -= %d", prefix, metric.Name, metric.Value)
 			}
 		}
 	}
@@ -174,6 +225,7 @@ func startIPerf(args []string, ch chan *PerfMetric) {
 }
 
 func main() {
+	rand.Seed(time.Now().UTC().UnixNano())
 
 	// Get configuration options
 	statsdHost := os.Getenv("STATSD_UDP_HOST")
@@ -219,9 +271,18 @@ func main() {
 
 	restartSecondsStr := os.Getenv("RESTART_SCONDS")
 	if restartSecondsStr == "" {
-		restartSecondsStr = "10"
+		restartSecondsStr = "5"
 	}
 	restartSeconds, err := strconv.Atoi(restartSecondsStr)
+	if err != nil {
+		log.Fatalf("Expecting RESTART_SCONDS to be a number")
+	}
+
+	restartRandomSecondsStr := os.Getenv("RESTART_RANDOM_SCONDS")
+	if restartRandomSecondsStr == "" {
+		restartRandomSecondsStr = "5"
+	}
+	restartRandomSeconds, err := strconv.Atoi(restartRandomSecondsStr)
 	if err != nil {
 		log.Fatalf("Expecting RESTART_SCONDS to be a number")
 	}
@@ -288,26 +349,50 @@ func main() {
 	metricsChan := make(chan *PerfMetric)
 	go statsdForwarder(statsdHost, statsdPort, statsdPrefix, metricsChan)
 
+	// Trap exit codes
+	signalChannel := make(chan os.Signal, 2)
+	signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-signalChannel
+		switch sig {
+		case os.Interrupt, syscall.SIGTERM:
+			log.Warnf("Caught exit signal")
+			// Reset the state countes
+			metricsChan <- &PerfMetric{
+				Name:  "running",
+				Value: int64(0),
+				Type:  TYPE_GAUGE,
+			}
+			metricsChan <- &PerfMetric{
+				Name:  "failing",
+				Value: int64(0),
+				Type:  TYPE_GAUGE,
+			}
+			metricsChan <- &PerfMetric{
+				Name:  "status",
+				Value: int64(1000),
+				Type:  TYPE_GAUGE,
+			}
+			time.Sleep(time.Second * 1)
+			log.Fatalf("Exiting")
+		}
+	}()
 	// Start the runner
 	for {
 		metricsChan <- &PerfMetric{
-			Name:  "status",
-			Value: int64(-1),
-			Type:  TYPE_GAUGE,
-		}
-		metricsChan <- &PerfMetric{
 			Name:  "running",
 			Value: int64(1),
-			Type:  TYPE_INCREMENT,
+			Type:  TYPE_GAUGE,
 		}
 		startIPerf(args, metricsChan)
 		metricsChan <- &PerfMetric{
 			Name:  "running",
-			Value: int64(1),
-			Type:  TYPE_DECREMENT,
+			Value: int64(0),
+			Type:  TYPE_GAUGE,
 		}
 
-		log.Infof("Going to re-start in %d seconds...", restartSeconds)
-		time.Sleep(time.Second * time.Duration(restartSeconds))
+		sleepSec := float32(restartSeconds) + (rand.Float32() * float32(restartRandomSeconds))
+		log.Infof("Going to re-start in %.2f seconds...", sleepSec)
+		time.Sleep(time.Second * time.Duration(sleepSec))
 	}
 }
